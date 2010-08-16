@@ -4,7 +4,7 @@
  * Configurations for ExtDirect integration
  * Default values for all boolean configurations is "false" (this is easy to remember)
  * 
- * @author jbruni
+ * @author J. Bruni
  */
 class ExtDirect
 {
@@ -32,6 +32,11 @@ class ExtDirect
 	 * @var string   Ext.Direct API attribute "descriptor"
 	 */
 	static public $descriptor = 'Ext.php.REMOTING_API';
+	
+	/**
+	 * @var string   Ext.Direct Provider attribute "id"
+	 */
+	static public $id = '';
 	
 	/**
 	 * @var boolean   Set this to true to count only the required parameters of a method for the API "len" attribute
@@ -74,16 +79,40 @@ class ExtDirect
 	static public $default_api_output = 'json';
 	
 	/**
-	 * @return string   JSON encoded array containing the full API declaration
+	 * @var callback   Function to be called before the API action call, to perform authorization; parameter: ExtDirectAction $action
 	 */
-	static public function get_api_json()
+	static public $authorization_function = null;
+	
+	/**
+	 * @var callback   Function to be called after the API action call, to transform its results; parameters: ExtDirectAction $action, mixed $result
+	 */
+	static public $transform_result_function = null;
+	
+	/**
+	 * @var callback   Function to be called after the API action call, to transform the response structure; parameters: ExtDirectAction $action, array $response
+	 */
+	static public $transform_response_function = null;
+	
+	/**
+	 * @var callback   Function to be called during the API generation, allowing a method to be declared or not; parameters: string $class, string $method
+	 */
+	static public $declare_method_function = null;
+	
+	/**
+	 * @return string   Array containing the full API declaration
+	 */
+	static public function get_api_array()
 	{
 		$api_array = array(
+			'id'         => self::$id,
 			'url'        => ( empty( self::$url ) ? $_SERVER['PHP_SELF'] : self::$url ),
 			'type'       => 'remoting',
 			'namespace'  => self::$namespace,
 			'descriptor' => self::$descriptor
 		);
+		
+		if ( empty( $api_array['id'] ) )
+			unset( $api_array['id'] );
 		
 		$actions = array();
 		
@@ -110,6 +139,10 @@ class ExtDirect
 				if ( !self::$include_inherited_methods && ( $method->getDeclaringClass()->name != $class ) )
 					continue;
 				
+				// If "declare_method_function" is set, we test if the method can be declared, according to its return result
+				if ( !empty( self::$declare_method_function ) && !call_user_func( self::$declare_method_function, $class, $method->getName() ) )
+					continue;
+				
 				// Count only required parameters or count them all, according to "count_only_required_params" configuration 
 				if ( self::$count_only_required_params )
 					$api_method = array( 'name' => $method->getName(), 'len' => $method->getNumberOfRequiredParameters() );
@@ -127,7 +160,15 @@ class ExtDirect
 		
 		$api_array['actions'] = $actions;
 		
-		return json_encode( $api_array );
+		return $api_array;
+	}
+	
+	/**
+	 * @return string   JSON encoded array containing the full API declaration
+	 */
+	static public function get_api_json()
+	{
+		return json_encode( self::get_api_array() );
 	}
 	
 	/**
@@ -156,7 +197,7 @@ JAVASCRIPT;
 	 * Provide access via Ext.Direct to the specified class or classes
 	 * This method does one of the following two things, depending on the HTTP request.
 	 * 1) Outputs the API declaration in the chosen format (JSON or JavaScript)
-	 * 2) Process the action(s) and return its result(s) (JSON, or HTML on file upload)
+	 * 2) Process the action(s) and return its result(s) (JSON)
 	 * @param string | array $api_classes   Class name(s) to publish in the API declaration
 	 */
 	static public function provide( $api_classes = null )
@@ -168,7 +209,7 @@ JAVASCRIPT;
 /**
  * Process Ext.Direct HTTP requests
  * 
- * @author jbruni
+ * @author J. Bruni
  */
 class ExtDirectRequest
 {
@@ -244,7 +285,7 @@ class ExtDirectRequest
 /**
  * Store HTTP response contents for output
  * 
- * @author jbruni
+ * @author J. Bruni
  */
 class ExtDirectResponse
 {
@@ -262,7 +303,7 @@ class ExtDirectResponse
 /**
  * Call a Ext.Direct API class method and format the results
  * 
- * @author jbruni
+ * @author J. Bruni
  */
 class ExtDirectAction
 {
@@ -295,6 +336,16 @@ class ExtDirectAction
 	 * @var boolean   True if this action is handling a form; false otherwise
 	 */
 	public $form_handler = false;
+	
+	/**
+	 * @var boolean   False only when "authorization_function" (if configured) returns a non-true value
+	 */
+	public $authorized = true;
+	
+	/**
+	 * @var Exception   Exception object, instantiated if an exception occurs while executing the action
+	 */
+	public $exception;
 	
 	/**
 	 * @param string $action   API class name
@@ -340,7 +391,11 @@ class ExtDirectAction
 					'message' => $e->getMessage(),
 					'where'   => $e->getTraceAsString()
 				);
+			$this->exception = $e;
 		}
+		
+		if ( is_callable( ExtDirect::$transform_response_function ) )
+			$response = call_user_func( ExtDirect::$transform_response_function, $this, $response );
 		
 		if ( ExtDirect::$utf8_encode )
 			array_walk_recursive( $response, array( $this, 'utf8_encode' ) );
@@ -383,6 +438,9 @@ class ExtDirectAction
 		else
 			$params = $ref_method->getNumberOfParameters();
 		
+		if ( $this->upload && ( count( $_FILES ) == 1 ) )
+			$params -= 1;
+		
 		if ( count( $this->parameters ) < $params )
 			throw new Exception( 'Call to ' . $class . ' method ' . $this->method . ' needs at least ' . $params . ' parameters', E_USER_ERROR );
 		
@@ -397,6 +455,8 @@ class ExtDirectAction
 			$parameters = $this->parameters;
 		else
 		{
+			$parameters = array();
+			
 			// We treat formHandler's parameters in a special way
 			foreach( $ref_method->getParameters() as $ref_parameter )
 			{
@@ -425,7 +485,7 @@ class ExtDirectAction
 			
 			// If the method is static, we usually don't need to create an instance
 			if ( !ExtDirect::$instantiate_static )
-				return call_user_func_array( array( $class, $this->method ), $parameters );
+				return $this->call_action_func_array( array( $class, $this->method ), $parameters );
 		}
 		
 		// By default, we don't send parameters to constructor, but "constructor_send_params" configuration allows this
@@ -437,14 +497,46 @@ class ExtDirectAction
 			$this->instance = $ref_class->newInstanceArgs( $this->parameters );
 		}
 		
-		return call_user_func_array( array( $this->instance, $this->method ), $parameters );
+		return $this->call_action_func_array( array( $this->instance, $this->method ), $parameters );
+	}
+	
+	/**
+	 * Checks for authorization (if "authorization_function" is configured), calls the action method,
+	 * transform the results (if "transform_result_function" is configured), and then return the results
+	 * 
+	 * @param callback $callback   Action method to be called
+	 * @param array $parameters   Parameters to pass to the action method
+	 * @return mixed   Result of the action method
+	 */
+	protected function call_action_func_array( $callback, $parameters )
+	{
+		if ( is_callable( ExtDirect::$authorization_function ) )
+		{
+			$auth_result = call_user_func( ExtDirect::$authorization_function, $this );
+			
+			if ( $auth_result === false )
+				throw new Exception( 'Not authorized to call ' . $this->action . '::' . $this->method, E_USER_ERROR );
+			
+			elseif ( $auth_result !== true )
+				$result = $auth_result;
+			
+			$this->authorized = ( $auth_result === true );
+		}
+		
+		if ( !isset( $result ) )
+			$result = call_user_func_array( $callback, $parameters );
+		
+		if ( is_callable( ExtDirect::$transform_result_function ) )
+			$result = call_user_func( ExtDirect::$transform_result_function, $this, $result );
+		
+		return $result;
 	}
 }
 
 /**
  * Ext.Direct API controller
  * 
- * @author jbruni
+ * @author J. Bruni
  */
 class ExtDirectController
 {
