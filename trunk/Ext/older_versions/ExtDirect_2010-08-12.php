@@ -64,7 +64,7 @@ class ExtDirect
 	static public $constructor_send_params = false;
 	
 	/**
-	 * @var boolean   Set this to true to allow detailed information about exceptions in the output
+	 * @var boolean   Set this to true to allow exception detailed information in the output
 	 */
 	static public $debug  = false;
 	
@@ -97,11 +97,6 @@ class ExtDirect
 	 * @var callback   Function to be called during the API generation, allowing a method to be declared or not; parameters: string $class, string $method
 	 */
 	static public $declare_method_function = null;
-	
-	/**
-	 * @var array   Parameters to be sent to the class constructor (use the class name as key); example: array( 'MyClass' => array( 'param1', 'param2' ) )
-	 */
-	static public $constructor_params = array();
 	
 	/**
 	 * @return string   Array containing the full API declaration
@@ -177,14 +172,11 @@ class ExtDirect
 	}
 	
 	/**
-	 * @return string   JavaScript code containing the full API declaration
+	 * @return string   JSON encoded array containing the full API declaration
 	 */
 	static public function get_api_javascript()
 	{
 		$template = <<<JAVASCRIPT
-
-if ( Ext.syncRequire )
-	Ext.syncRequire( 'Ext.direct.Manager' );
 
 Ext.namespace( '[%namespace%]' );
 [%descriptor%] = [%actions%];
@@ -232,7 +224,7 @@ class ExtDirectRequest
 	public $upload = false;
 	
 	/**
-	 * Call the correct actions processing method according to $_POST['extAction'] availability
+	 * Call the correct action processing method according to $_POST['extAction'] availability
 	 */
 	public function __construct()
 	{
@@ -356,12 +348,11 @@ class ExtDirectAction
 	public $exception;
 	
 	/**
-	 * @param string  $action   API class name
-	 * @param string  $method   Method name
-	 * @param array   $parameters   Method parameters
+	 * @param string $action   API class name
+	 * @param string $method   Method name
+	 * @param mixed $parameters   Method parameters
 	 * @param integer $transaction_id   Unique identifier for the transaction
 	 * @param boolean $upload   True if there is a file upload; false otherwise
-	 * @param boolean $form_handler   True if the action is a form handler; false otherwise
 	 */
 	public function __construct( $action, $method, $parameters, $transaction_id, $upload = false, $form_handler = false )
 	{
@@ -439,10 +430,6 @@ class ExtDirectAction
 		if ( ( substr( $this->method, 0, 2 ) == '__' ) || !in_array( $this->method, get_class_methods( $class ) ) )
 			throw new Exception( 'Call to undefined or not allowed method ' . $class . '::' . $this->method, E_USER_ERROR );
 		
-		// Do not allow calls to methods that do not pass the declare_method_function (if configured)
-		if ( !empty( self::$declare_method_function ) && !call_user_func( self::$declare_method_function, $class, $this->method ) )
-			throw new Exception( 'Call to undefined or not allowed method ' . $class . '::' . $this->method, E_USER_ERROR );
-		
 		$ref_method = new ReflectionMethod( $class, $this->method );
 		
 		// Get number of parameters for the method
@@ -501,18 +488,13 @@ class ExtDirectAction
 				return $this->call_action_func_array( array( $class, $this->method ), $parameters );
 		}
 		
-		// By default, we don't send parameters to constructor, but "constructor_send_params" and "constructor_params" configurations allow this
-		if ( !ExtDirect::$constructor_send_params && empty( ExtDirect::$constructor_params[$class] ) )
+		// By default, we don't send parameters to constructor, but "constructor_send_params" configuration allows this
+		if ( !ExtDirect::$constructor_send_params )
 			$this->instance = new $class;
 		else
 		{
-			if ( empty( ExtDirect::$constructor_params[$class] ) )
-				$constructor_params = $this->parameters;
-			else
-				$constructor_params = ExtDirect::$constructor_params[$class];
-			
 			$ref_class = new ReflectionClass( $class );
-			$this->instance = $ref_class->newInstanceArgs( $constructor_params );
+			$this->instance = $ref_class->newInstanceArgs( $this->parameters );
 		}
 		
 		return $this->call_action_func_array( array( $this->instance, $this->method ), $parameters );
@@ -532,13 +514,13 @@ class ExtDirectAction
 		{
 			$auth_result = call_user_func( ExtDirect::$authorization_function, $this );
 			
-			$this->authorized = ( $auth_result === true );
-			
 			if ( $auth_result === false )
 				throw new Exception( 'Not authorized to call ' . $this->action . '::' . $this->method, E_USER_ERROR );
 			
 			elseif ( $auth_result !== true )
 				$result = $auth_result;
+			
+			$this->authorized = ( $auth_result === true );
 		}
 		
 		if ( !isset( $result ) )
@@ -569,7 +551,7 @@ class ExtDirectController
 	public $response;
 	
 	/**
-	 * @param string $api_classes   Name of the class or classes to be published to the Ext.Direct API
+	 * @param string $actions_class   Name of the API class (ExtDirectActions descendant)
 	 * @param boolean $autorun   If true, automatically run the controller
 	 */
 	public function __construct( $api_classes = null, $autorun = true )
